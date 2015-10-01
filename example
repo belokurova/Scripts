@@ -1,0 +1,500 @@
+USE [InstitutionalMetrics]
+GO
+/****** Object:  StoredProcedure [dbo].[SPROC_REGR_GE_Core_copy]    Script Date: 10/1/2015 10:46:20 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+ALTER procedure [dbo].[SPROC_REGR_GE_Core_copy] as
+truncate table InstitutionalMetrics.dbo.REGR_GE_Core1
+
+
+--Graduation and Retention Script
+
+--- STEP #1
+select distinct
+t4.SyStudentID,
+t4.AdEnrollID,
+t4.adProgramDescrip,
+t4.adProgramVersionID,
+t4.SySchoolStatusID,
+t4.StartDate,
+t4.StatusDate,
+t5.CIPCode,
+t5.Code as ProgramCode,
+t5.Descrip as ProgramDescrip,
+t6.AdDegreeID,
+t7.code as DegreeCode,
+t7.descrip as DegreeDescrip,
+t8.Code as AwardLevelCode,
+t8.Descrip,
+t9.AwardLevelDescrip,
+t9.Code as NormalizedProgramCode,
+t11.Descrip as SchoolStatus,
+t12.Category,
+case      when t11.Descrip in ('Graduate')                                then 1
+          when t12.Category='A'                                           then 5
+          when t11.Descrip in ('Drop', 'Drop Ineligible','Drop Eligible') then 10
+          when t11.Descrip in ('LOA - Term', 'LOA  Extension - Term')     then 50
+          when t11.Descrip in ('Transfer To Other Campus')                then 100
+          when t11.Descrip in ('Transfer To Other Program')               then 1000 
+          else 10000  
+          end as RevisedSchoolStatus 
+into IR.dbo.#tb1
+from Repl_CampusVue_ACC.dbo.adenroll                                     as t4  
+join Repl_CampusVue_ACC.dbo.AdProgram                                    as t5  on t4.AdProgramID=t5.AdProgramID 
+join Repl_CampusVue_ACC.dbo.AdProgramVersion                             as t6  on t4.adProgramVersionID=t6.adprogramversionid 
+join Repl_CampusVue_ACC.dbo.AdDegree                                     as t7  on t6.AdDegreeID=t7.AdDegreeID
+join Repl_CampusVue_ACC.dbo.AdDegreeLevel_vw                             as t8  on t7.DegreeLevel=t8.AdDegreeLevel_vwID
+join [PROGRAMMATIC ACCREDITATIONS].dbo.APrMapping as t9  on t9.Program=t6.Descrip
+join Repl_CampusVue_ACC.dbo.SySchoolStatus                               as t11 on t11.SySchoolStatusID=t4.SySchoolStatusID
+join Repl_CampusVue_ACC.dbo.syStatus              as t12 on t11.SyStatusID=t12.SyStatusID
+where t4.SyCampusID in ('8', '9', '10','11', '12', '15') 
+and   t12.Category in ('A', 'P', 'T') and t4.StartDate is not null 
+
+
+
+--- STEP #2
+select distinct
+SyStudentID,
+AwardLevelDescrip,	
+NormalizedProgramCode,
+Min(StartDate) as MinStartDate,
+Min(RevisedSchoolStatus) as RevisedSchoolStatus
+into IR.dbo.#tb2
+from IR.dbo.#tb1
+group by 
+SyStudentID,
+AwardLevelDescrip,	
+NormalizedProgramCode
+order by 
+SyStudentID
+
+--- STEP #3
+select distinct
+SyStudentID,
+sum(RevisedSchoolStatus) as SumRevisedSchoolStatus,
+count(NormalizedProgramCode) as CountNormalizedProgramCode
+into IR.dbo.#tb3
+from IR.dbo.#tb2
+group by 
+SyStudentID
+order by 
+SyStudentID	
+
+--- STEP #4
+select distinct *
+into IR.dbo.#tb4
+from IR.dbo.#tb3
+where SumRevisedSchoolStatus>1000
+order by 
+SyStudentID
+
+--- STEP #5
+select distinct b.*
+into IR.dbo.#Transfer
+from 
+     IR.dbo.#tb4  as a 
+join IR.dbo.#tb2  as b on a.SyStudentID=b.SyStudentID
+where b.RevisedSchoolStatus<>1000 
+order by 
+b.SyStudentID
+
+
+--- STEP #5
+select distinct SyStudentID
+into IR.dbo.#tb6
+from IR.dbo.#tb2
+except
+select distinct SyStudentID
+from IR.dbo.#Transfer
+
+--- STEP #6
+select distinct b.*
+into IR.dbo.#NonTransfer
+from IR.dbo.#tb6   as a
+join IR.dbo.#tb2   as b on a.SyStudentID=b.SyStudentID
+order by 
+b.SyStudentID
+
+--- STEP #7
+select distinct *
+into IR.dbo.#Transfer_Plus_NonTransfer
+from IR.dbo.#NonTransfer
+union 
+select distinct *
+from IR.dbo.#Transfer
+
+--- STEP #8
+select distinct a.*, b.StatusDate
+into IR.dbo.#tb7
+from      IR.dbo.#Transfer_Plus_NonTransfer as a
+left join IR.dbo.#tb1                       as b 
+on  a.SyStudentID=b.SyStudentID 
+and a.NormalizedProgramCode=b.NormalizedProgramCode 
+and a.RevisedSchoolStatus=b.RevisedSchoolStatus 
+and a.AwardLevelDescrip=b.AwardLevelDescrip
+order by a.SyStudentID
+
+--- STEP #9
+select distinct
+SyStudentID,
+AwardLevelDescrip,
+NormalizedProgramCode,
+MinStartDate,
+RevisedSchoolStatus,
+Max(StatusDate) as MaxStatusDate
+into IR.dbo.#tb8
+from 
+IR.dbo.#tb7
+------where SyStudentID=672207
+group by 
+SyStudentID,
+AwardLevelDescrip,
+NormalizedProgramCode,
+MinStartDate,
+RevisedSchoolStatus
+order by 
+SyStudentID
+
+
+------------------------
+------------------------
+--- Process Transfers---
+------------------------
+------------------------
+select distinct 
+b.SyStudentID,
+Min(b.StartDate) as MinTransferStartDate  
+into IR.dbo.#tr1 
+from IR.dbo.#tb4 as a 
+join IR.dbo.#tb1 as b 
+on  a.SyStudentID=b.SyStudentID 
+where a.CountNormalizedProgramCode<3
+group by b.SyStudentID
+order by b.SyStudentID
+
+select distinct 
+b.SyStudentID,
+Min(b.StartDate)  as MinTransferStartDate, 
+Max(b.StatusDate) as MaxTransferStatusDate
+into IR.dbo.#tr2
+from IR.dbo.#tb4 as a 
+join IR.dbo.#tb1 as b 
+on  a.SyStudentID=b.SyStudentID 
+where a.CountNormalizedProgramCode>2 
+and b.RevisedSchoolStatus=1000
+group by 
+b.SyStudentID
+order by b.SyStudentID
+
+select distinct  
+ROW_NUMBER()OVER(PARTITION BY b.SyStudentID ORDER BY b.StatusDate) AS "RID",
+ b.SyStudentID,
+(b.StatusDate) as TransferStatusDate  
+into IR.dbo.#tr3
+from
+      IR.dbo.#tr2 as a
+join  IR.dbo.#tb1 as b on a.SyStudentID=b.SyStudentID 
+where b.StatusDate>a.MaxTransferStatusDate 
+order by b.SyStudentID, b.StatusDate
+
+select distinct * 
+into IR.dbo.#tr4
+from IR.dbo.#tr3
+where RID=1
+
+select distinct 
+b.SyStudentID,
+b.NormalizedProgramCode,
+b.StartDate,
+b.StatusDate
+into IR.dbo.#tr5
+from 
+     IR.dbo.#tr4 as a 
+join IR.dbo.#tb1 as b on a.SyStudentID=b.SyStudentID and a.TransferStatusDate=b.StatusDate
+order by b.SyStudentID
+
+select 
+a.*, 
+b.MinTransferStartDate,
+b.MaxTransferStatusDate
+into IR.dbo.#TM_ProgramTransfers
+from 
+      IR.dbo.#tr5 as a
+join  IR.dbo.#tr2 as b on a.SyStudentID=b.SyStudentID
+order by a.SyStudentID
+------------------------
+------------------------
+------------------------
+
+--- STEP #10
+select 
+a.*,
+
+case when b.MinTransferStartDate is null and c.MinTransferStartDate is null     then null
+     when b.MinTransferStartDate is null and c.MinTransferStartDate is not null then c.MinTransferStartDate
+     when c.MinTransferStartDate is null and b.MinTransferStartDate is not null then b.MinTransferStartDate
+     else null end as MinTransferStareDate
+into IR.dbo.#tb9
+from 
+          IR.dbo.#tb8                 as a 
+left join IR.dbo.#TM_ProgramTransfers as b on a.SyStudentID=b.SyStudentID and a.NormalizedProgramCode=b.NormalizedProgramCode
+left join IR.dbo.#tr1                 as c on a.SyStudentID=c.SyStudentID
+
+order by 
+a.SyStudentID,
+a.NormalizedProgramCode,
+a.MinStartDate
+
+
+--- STEP #11
+select distinct
+t4.SyStudentID,
+t4.AdEnrollID,
+t4.adProgramDescrip,
+t4.adProgramVersionID,
+t4.SySchoolStatusID,
+t4.StartDate,
+t4.StatusDate,
+t5.CIPCode,
+t5.Code as ProgramCode,
+t5.Descrip as ProgramDescrip,
+t6.AdDegreeID,
+t7.code as DegreeCode,
+t7.descrip as DegreeDescrip,
+t8.Code as AwardLevelCode,
+t8.Descrip,
+t9.AwardLevelDescrip,
+t9.Code as NormalizedProgramCode,
+t11.Descrip as SchoolStatus,
+t12.Category,
+t13.descrip as Campus,
+case      when t11.Descrip in ('Graduate')                                then 1
+          when t12.Category='A'                                           then 5
+          when t11.Descrip in ('Drop', 'Drop Ineligible','Drop Eligible') then 10
+          when t11.Descrip in ('LOA - Term', 'LOA  Extension - Term')     then 50
+          when t11.Descrip in ('Transfer To Other Campus')                then 100
+          when t11.Descrip in ('Transfer To Other Program')               then 1000 
+          else 10000  
+          end as RevisedSchoolStatus 
+into IR.dbo.#tb10
+from Repl_CampusVue_ACC.dbo.adenroll                                     as t4  
+join Repl_CampusVue_ACC.dbo.AdProgram                                    as t5  on t4.AdProgramID=t5.AdProgramID 
+join Repl_CampusVue_ACC.dbo.AdProgramVersion                             as t6  on t4.adProgramVersionID=t6.adprogramversionid 
+join Repl_CampusVue_ACC.dbo.AdDegree                                     as t7  on t6.AdDegreeID=t7.AdDegreeID
+join Repl_CampusVue_ACC.dbo.AdDegreeLevel_vw                             as t8  on t7.DegreeLevel=t8.AdDegreeLevel_vwID
+join [PROGRAMMATIC ACCREDITATIONS].dbo.APrMapping as t9  on t9.Program=t6.Descrip
+join Repl_CampusVue_ACC.dbo.SySchoolStatus                               as t11 on t11.SySchoolStatusID=t4.SySchoolStatusID
+join Repl_CampusVue_ACC.dbo.syStatus              as t12 on t11.SyStatusID=t12.SyStatusID
+join Repl_CampusVue_ACC.dbo.SyCampus                                     as t13 on t4.SyCampusID=t13.SyCampusID
+where t4.SyCampusID in ('8', '9', '10', '11', '12', '15') 
+and   t12.Category in ('A', 'P', 'T') and t4.StartDate is not null 
+
+--- STEP #12
+select distinct 
+ROW_NUMBER()OVER(PARTITION BY a.SyStudentID ORDER BY a.MinStartDate) AS "RID",
+a.*, 
+b.Campus
+into IR.dbo.#t11
+from 
+       IR.dbo.#tb9  as a
+join   IR.dbo.#tb10 as b 
+on     a.SyStudentID=b.SyStudentID 
+   and a.NormalizedProgramCode=b.NormalizedProgramCode
+   and a.MaxStatusDate=b.StatusDate
+   and a.RevisedSchoolStatus=b.RevisedSchoolStatus
+order by a.SyStudentID, a.MinStartDate
+
+--- STEP #13
+select distinct
+t1.SyStudentId,
+t1.DOB,
+t5.Code as Sex,     
+case when t4.Descrip='Hispanic/Latino'                                   then 1
+     when t4.Descrip='American Indian or Alaska Native'                  then 2
+     when t4.Descrip='Asian'                                             then 3
+     when t4.Descrip='Black or African American'                         then 4
+     when t4.Descrip='Native Hawaiian or Other Pacific Islander'         then 5
+     when t4.Descrip='White'                                             then 6
+     when t4.Descrip in ('Race and Ethnicity Unknown', 'Not Specified')  then 7
+     when t4.Descrip='Nonresident Alien'                                 then 8
+     when t4.Descrip='Two or more races'                                 then 9
+     when t4.Descrip='Filipino'                                          then 14 else 99 end as Race,
+t10.Code   as PrevEducation,
+ 
+(	select SUM(a.CreditsEarned) 
+from Repl_CampusVue_ACC.dbo.adenrollsched as a 
+where a.SyStudentID=t1.SyStudentID and a.AdGradeLetterCode ='TC') as TC,
+
+case when 
+(	select SUM(a.CreditsEarned) from Repl_CampusVue_ACC.dbo.adenrollsched as a 
+where a.SyStudentID=t1.SyStudentID  and a.AdGradeLetterCode='TC'	) >= 0 then 'Transfer-Student'
+
+when (	select SUM(a.CreditsEarned) from Repl_CampusVue_ACC.dbo.adenrollsched as a 
+where a.SyStudentID=t1.SyStudentID  and a.AdGradeLetterCode='TC'	) is null and (	t10.Code in ('UN') or t10.Code is null	)
+then 'Unknown' 
+ 
+when (	select SUM(a.CreditsEarned) from Repl_CampusVue_ACC.dbo.adenrollsched as a 
+where a.SyStudentID=t1.SyStudentID  and a.AdGradeLetterCode='TC'	) is null and (	t10.Code in ('SOMECOLL', 'MAST', 'BACH', 'ASSOC', 'MS', 'BS', 'AA')	)
+then 'Transfer-Student'
+
+else  'First-Time Student' end as EnrollmentType 
+into IR.dbo.#tb12
+from          
+            Repl_CampusVue_ACC.dbo.syStudent        as t1
+join        Repl_CampusVue_ACC.dbo.AdEnroll         as t2  on t1.SyStudentID = t2.SyStudentID 
+left join   Repl_CampusVue_ACC.dbo.SyStudentAmRace  as t3  on t1.SyStudentId = t3.SyStudentID 
+join        Repl_CampusVue_ACC.dbo.amRace           as t4  on t3.AmRaceID = t4.AmRaceID 
+left join   Repl_CampusVue_ACC.dbo.amSex            as t5  on t1.amSexID = t5.amSexID      
+join        Repl_CampusVue_ACC.dbo.adprogramversion as t6  on t2.adProgramVersionID=t6.AdProgramVersionID
+join        Repl_CampusVue_ACC.dbo.SyCampus         as t7  on t2.SyCampusID=t7.SyCampusID
+join        Repl_CampusVue_ACC.dbo.SySchoolStatus   as t8  on t2.SySchoolStatusID=t8.SySchoolStatusID
+join        Repl_CampusVue_ACC.dbo.syStatus         as t9  on t8.SyStatusID=t9.SyStatusID
+left join   Repl_CampusVue_ACC.dbo.amPrevEduc       as t10 on t1.AmPrevEducID=t10.amPrevEducID 
+left join   Repl_CampusVue_ACC.dbo.adenrollsched    as t11 on t2.SyStudentID=t11.SyStudentID
+join        Repl_CampusVue_ACC.dbo.AdCourse         as t12 on t11.AdCourseID=t12.AdCourseID
+where  t7.SyCampusID in ('8', '9', '10', '11', '12', '15')
+group by 
+t1.SyStudentId,
+t1.DOB,
+t5.Code,
+t4.Descrip,
+t10.Code
+order by 
+t1.SyStudentId
+
+select distinct
+SyStudentId,
+Sex,
+DOB,	
+PrevEducation,	
+TC,
+EnrollmentType,
+min(Race) as Race
+into IR.dbo.#tb13
+from IR.dbo.#tb12
+group by 
+SyStudentId,
+Sex,
+DOB,	
+PrevEducation,	
+TC,
+EnrollmentType
+ORDER BY 
+SyStudentId
+
+
+select distinct
+a.*,
+b.Sex,
+b.DOB,
+b.Race,
+b.PrevEducation,
+b.TC,
+b.EnrollmentType,
+case when a.RID>1 then 'Transfer-Student' else EnrollmentType end as RevisedEnrollmentType
+
+into IR.dbo.#tb14
+from
+          IR.dbo.#t11  as a
+left join IR.dbo.#tb13 as b on a.SyStudentID=b.SyStudentID 
+order by 
+a.SyStudentId,
+a.RID
+
+select 
+RID,
+SyStudentID,
+AwardLevelDescrip,
+NormalizedProgramCode,
+MinStartDate,
+RevisedSchoolStatus,
+MaxStatusDate,
+MinTransferStareDate,
+Campus,
+
+case when MinTransferStareDate is null     then MinStartDate
+     when MinTransferStareDate is not null then MinTransferStareDate else null end as TrueMinStartDate,
+     
+
+case when Sex is null                   then 'Unknown'     
+     when Sex='U'                       then 'Unknown' else Sex                   end as Sex,
+case when Race is null                  then 7         else Race                  end as Race,
+datediff(YY, DOB, MaxStatusDate) as Age,
+case when RevisedEnrollmentType is null then 'Unknown' else RevisedEnrollmentType end as RevisedEnrollmentType 
+into IR.dbo.#tb15
+from IR.dbo.#tb14
+order by 
+SyStudentID,
+RID
+
+select 
+*, 
+datediff(DD, TrueMinStartDate, MaxStatusDate) as RedFlag
+into InstitutionalMetrics.dbo.#REGR
+from IR.dbo.#tb15
+
+--Step 14 -- Find Core Start Date
+
+select * 
+into InstitutionalMetrics.dbo.#tba
+from 
+(select a.SyStudentID, 'NURS' as PL, min(a.StartDate) as CoreStartDate
+from Repl_CampusVue_ACC.dbo.AdEnrollSched as a
+join Repl_CampusVue_ACC.dbo.AdCourse      as b on a.AdCourseID=b.AdCourseID
+where b.Code  in ('NURS 110', 'NURS 100')     
+                   and a.Status not in ('S','F')  
+             and a.AdGradeLetterCode in ('a', 'a-', 'b+', 'b', 'b-', 'c+', 'c', 'C-', 'D-', 'D', 'D+', 'F','W', 'WF', 'NP','P', ' ')
+group by a.SyStudentID
+
+UNION
+
+select a.SyStudentID, 'DH' as PL, min(a.StartDate) as CoreStartDate
+from Repl_CampusVue_ACC.dbo.AdEnrollSched as a
+join Repl_CampusVue_ACC.dbo.AdCourse      as b on a.AdCourseID=b.AdCourseID
+where b.Code  in ('DHYG 302', 'DHYG 391', 'DHYG 305', 'DHYG 341', 'DHYG 140', 'DHYG 100', 'DHYG 130', 'DHYG 205')     
+                   and a.Status not in ('S','F')  
+             and a.AdGradeLetterCode in ('a', 'a-', 'b+', 'b', 'b-', 'c+', 'c', 'C-', 'D-', 'D', 'D+', 'F','W', 'WF', 'NP','P', ' ')
+group by a.SyStudentID) as a
+order by a.SystudentID
+
+
+select 
+a.*,
+b.PL,
+b.CoreStartDate
+--into InstitutionalMetrics.dbo.REGR_GE_Core1
+from  InstitutionalMetrics.dbo.#REGR  as a
+left join  InstitutionalMetrics.dbo.#tba  as b on a.SystudentID=b.SystudentID
+
+-----------------------------------------------
+
+drop table InstitutionalMetrics.dbo.#tba
+drop table InstitutionalMetrics.dbo.#REGR
+
+drop table IR.dbo.#tb1
+drop table IR.dbo.#tb2
+drop table IR.dbo.#tb3
+drop table IR.dbo.#tb4
+drop table IR.dbo.#tb6
+drop table IR.dbo.#tb7
+drop table IR.dbo.#tb8
+drop table IR.dbo.#tb9
+drop table IR.dbo.#tb10
+drop table IR.dbo.#t11
+drop table IR.dbo.#tb12
+drop table IR.dbo.#tb13
+drop table IR.dbo.#tb14
+drop table IR.dbo.#tb15
+drop table IR.dbo.#tr1
+drop table IR.dbo.#tr2
+drop table IR.dbo.#tr3
+drop table IR.dbo.#tr4
+drop table IR.dbo.#tr5
+drop table IR.dbo.#TM_ProgramTransfers
+drop table IR.dbo.#Transfer
+drop table IR.dbo.#NonTransfer
+drop table IR.dbo.#Transfer_Plus_NonTransfer
